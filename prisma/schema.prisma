@@ -1,0 +1,552 @@
+// Court of Cassation — Integrated System for the General Secretariat
+// نظام الأمانة العامة لمجلس القضاء الأعلى بمحكمة النقض المتكامل
+// Prisma schema covering the four modules + RBAC + audit + notifications.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Users, Roles & Access Control (Section 9) — نظام إدارة المستخدمين والصلاحيات
+// ---------------------------------------------------------------------------
+
+enum Role {
+  SYSTEM_ADMIN       // مسؤول النظام
+  SECRETARY_GENERAL  // الأمين العام (full authority owner — see clarification M1-1)
+  DEPUTY_SECRETARY   // الأمين العام المساعد
+  COUNCIL_MEMBER     // عضو المجلس
+  DATA_OFFICER       // مسؤول بيانات القضاة
+  COURT_OFFICER      // مسؤول المحكمة
+  JUDGE              // قاضٍ
+  VIEWER             // مستخدم عرض فقط
+}
+
+model User {
+  id            String    @id @default(cuid())
+  username      String    @unique
+  email         String?   @unique
+  fullName      String
+  passwordHash  String
+  role          Role
+  isActive      Boolean   @default(true)
+  twoFactorEnabled Boolean @default(false)
+  lastLoginAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // A user account may be linked to a judge profile (for JUDGE / COUNCIL_MEMBER roles)
+  judge         Judge?    @relation(fields: [judgeId], references: [id])
+  judgeId       String?   @unique
+
+  auditLogs        AuditLog[]
+  assignedDocs     CouncilDocument[] @relation("AssignedMember")
+  votes            Vote[]
+  accessRequests   AccessRequest[]   @relation("Requester")
+  grantedAccess    TemporaryAccess[] @relation("GrantedTo")
+  notifications    Notification[]
+}
+
+// Temporary, document-scoped access to a judge file (Section 9.3)
+model TemporaryAccess {
+  id          String    @id @default(cuid())
+  user        User      @relation("GrantedTo", fields: [userId], references: [id])
+  userId      String
+  judge       Judge     @relation(fields: [judgeId], references: [id])
+  judgeId     String
+  document    CouncilDocument? @relation(fields: [documentId], references: [id])
+  documentId  String?
+  reason      String?
+  grantedAt   DateTime  @default(now())
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  isActive    Boolean   @default(true)
+}
+
+// ---------------------------------------------------------------------------
+// Module 1 — Judges Digital Registry (Section 4) — السجل الرقمي للقضاة
+// ---------------------------------------------------------------------------
+
+enum JudicialGrade {
+  PRESIDENT_COURT       // رئيس محكمة النقض
+  VICE_PRESIDENT        // نائب رئيس
+  COUNSELOR             // مستشار
+  ASSISTANT_COUNSELOR   // مستشار مساعد
+  JUDGE                 // قاضٍ
+}
+
+model Judge {
+  id              String    @id @default(cuid())
+  fileNumber      String    @unique          // رقم الملف
+  nationalId      String    @unique          // الرقم القومي
+  fullNameAr      String                     // الاسم بالعربية
+  fullNameEn      String?                    // الاسم بالإنجليزية
+  birthDate       DateTime?
+  nationality     String    @default("مصري")
+  maritalStatus   String?
+  childrenCount   Int?
+  grade           JudicialGrade @default(JUDGE)
+  appointmentDate DateTime?                  // تاريخ التعيين
+  photoUrl        String?
+  currentCourtId  String?
+  currentCourt    Court?    @relation(fields: [currentCourtId], references: [id])
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User?
+
+  // 12 categories (4.2)
+  qualifications      Qualification[]
+  addresses           JudgeAddress[]
+  languages           LanguageSkill[]
+  complaints          Complaint[]
+  sanctions           Sanction[]
+  inspectionReports   InspectionReport[]
+  secondments         Secondment[]
+  medicalExcuses      MedicalExcuse[]
+  trainings           Training[]
+  extraDuties         ExtraDuty[]
+  careerHistory       CareerRecord[]
+  contacts            ContactInfo[]
+
+  documents           JudgeDocument[]
+  temporaryAccess     TemporaryAccess[]
+  councilDocuments    CouncilDocument[]
+  wishes              MovementWish[]
+  allocations         MovementAllocation[]
+  assemblyCandidacies AssemblyCandidate[]
+}
+
+// 4.2.1 Personal / contact
+model ContactInfo {
+  id        String  @id @default(cuid())
+  judge     Judge   @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId   String
+  type      String  // mobile / home / work / email
+  value     String
+  isPrimary Boolean @default(false)
+}
+
+// 4.2.2 المؤهلات العلمية
+model Qualification {
+  id           String   @id @default(cuid())
+  judge        Judge    @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId      String
+  degree       String   // بكالوريوس / ماجستير / دكتوراه / دورة
+  institution  String?
+  faculty      String?
+  year         Int?
+  grade        String?  // التقدير
+  subject      String?
+  notes        String?
+}
+
+// 4.2.3 بيانات الإقامة والعنوان
+model JudgeAddress {
+  id           String  @id @default(cuid())
+  judge        Judge   @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId      String
+  kind         String  @default("permanent") // permanent / temporary
+  governorate  String?
+  district     String?
+  street       String?
+  emergencyContact String?
+}
+
+// 4.2.4 اللغات
+model LanguageSkill {
+  id         String  @id @default(cuid())
+  judge      Judge   @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId    String
+  language   String
+  level      String  // beginner / intermediate / advanced / fluent
+  certificate String?
+}
+
+// 4.2.5 الشكاوى
+model Complaint {
+  id          String    @id @default(cuid())
+  judge       Judge     @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId     String
+  number      String?
+  subject     String
+  submittedBy String?
+  submittedAt DateTime?
+  status      String    @default("under_review") // under_review / closed / referred
+  result      String?
+  closedAt    DateTime?
+}
+
+// 4.2.6 الجزاءات
+model Sanction {
+  id         String    @id @default(cuid())
+  judge      Judge     @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId    String
+  type       String    // warning / deduction / suspension / other
+  reason     String?
+  issuedBy   String?
+  issuedAt   DateTime?
+  status     String    @default("active") // active / expired / appealed
+  notes      String?
+}
+
+// 4.2.7 تقارير التفتيش
+model InspectionReport {
+  id            String    @id @default(cuid())
+  judge         Judge     @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId       String
+  reportNumber  String?
+  judicialYear  String?
+  rating        String?   // excellent / very_good / good / acceptable
+  inspectorName String?
+  inspectedAt   DateTime?
+  notes         String?
+  objection     String?
+}
+
+// 4.2.8 الانتدابات والإعارات
+model Secondment {
+  id          String    @id @default(cuid())
+  judge       Judge     @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId     String
+  type        String    // secondment / internal_loan / external_loan
+  destination String?
+  startDate   DateTime?
+  endDate     DateTime?
+  reason      String?
+  status      String    @default("ongoing") // ongoing / ended
+}
+
+// 4.2.9 الأعذار الطبية (feeds Module 3 — sensitive, see M1-4)
+model MedicalExcuse {
+  id          String    @id @default(cuid())
+  judge       Judge     @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId     String
+  type        String
+  startDate   DateTime?
+  endDate     DateTime?
+  diagnosis   String?   // restricted field
+  provider    String?
+  days        Int?
+  isVerified  Boolean   @default(false)
+}
+
+// 4.2.10 الدورات والتدريب
+model Training {
+  id          String    @id @default(cuid())
+  judge       Judge     @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId     String
+  name        String
+  subject     String?
+  organizer   String?
+  scope       String?   // local / international
+  startDate   DateTime?
+  endDate     DateTime?
+  certified   Boolean   @default(false)
+  score       String?
+}
+
+// 4.2.11 المهام والأعمال الإضافية
+model ExtraDuty {
+  id        String    @id @default(cuid())
+  judge     Judge     @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId   String
+  title     String
+  entity    String?
+  startDate DateTime?
+  endDate   DateTime?
+  summary   String?
+}
+
+// 4.2.12 المسار الوظيفي
+model CareerRecord {
+  id           String    @id @default(cuid())
+  judge        Judge     @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId      String
+  position     String
+  courtOrEntity String?
+  grade        JudicialGrade?
+  startDate    DateTime?
+  endDate      DateTime?
+  order        Int       @default(0)
+}
+
+// 4.3 documents attached to any category
+model JudgeDocument {
+  id          String   @id @default(cuid())
+  judge       Judge    @relation(fields: [judgeId], references: [id], onDelete: Cascade)
+  judgeId     String
+  category    String   // which of the 12 categories
+  name        String
+  fileUrl     String
+  fileType    String?  // pdf / image / word
+  documentDate DateTime?
+  uploadedById String?
+  uploadedAt  DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Courts (shared reference data)
+// ---------------------------------------------------------------------------
+
+model Court {
+  id            String   @id @default(cuid())
+  name          String
+  type          String?  // circuit / chamber
+  governorate   String?
+  createdAt     DateTime @default(now())
+
+  judges        Judge[]
+  needs         CourtNeed[]
+  allocations   MovementAllocation[]
+}
+
+// ---------------------------------------------------------------------------
+// Module 2 — Council Roll / Workflow (Section 5) — رول المجلس
+// ---------------------------------------------------------------------------
+
+enum DocumentStatus {
+  RECEIVED       // وارد جديد
+  DISTRIBUTED    // موزَّع
+  UNDER_STUDY    // قيد الدراسة
+  UNDER_REVIEW   // قيد المراجعة
+  IN_VOTING      // قيد التصويت
+  IN_EXECUTION   // قيد التنفيذ
+  CLOSED         // مغلق
+}
+
+model CouncilDocument {
+  id            String         @id @default(cuid())
+  reference     String         @unique
+  title         String
+  summary       String?
+  type          String?
+  status        DocumentStatus @default(RECEIVED)
+  judge         Judge?         @relation(fields: [judgeId], references: [id])
+  judgeId       String?
+  assignedTo    User?          @relation("AssignedMember", fields: [assignedToId], references: [id])
+  assignedToId  String?
+  dueDate       DateTime?
+  recommendation String?       // العضو's recommendation
+  reviewNotes   String?        // الأمين العام المساعد notes
+  receivedAt    DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  meeting       Meeting?       @relation(fields: [meetingId], references: [id])
+  meetingId     String?
+  votes         Vote[]
+  executionForm ExecutionForm?
+  accessRequests AccessRequest[]
+  temporaryAccess TemporaryAccess[]
+  history       DocumentHistory[]
+}
+
+model DocumentHistory {
+  id          String   @id @default(cuid())
+  document    CouncilDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentId  String
+  fromStatus  DocumentStatus?
+  toStatus    DocumentStatus
+  actorId     String?
+  note        String?
+  createdAt   DateTime @default(now())
+}
+
+// 5.4 الاجتماع الإلكتروني
+model Meeting {
+  id          String   @id @default(cuid())
+  title       String
+  scheduledAt DateTime?
+  status      String   @default("scheduled") // scheduled / in_progress / closed
+  minutesUrl  String?
+  createdAt   DateTime @default(now())
+
+  documents   CouncilDocument[]
+  votes       Vote[]
+}
+
+enum VoteChoice {
+  APPROVE   // موافقة
+  REJECT    // رفض
+  ABSTAIN   // امتناع
+}
+
+model Vote {
+  id          String     @id @default(cuid())
+  document    CouncilDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentId  String
+  meeting     Meeting?   @relation(fields: [meetingId], references: [id])
+  meetingId   String?
+  member      User       @relation(fields: [memberId], references: [id])
+  memberId    String
+  choice      VoteChoice
+  createdAt   DateTime   @default(now())
+
+  @@unique([documentId, memberId])
+}
+
+// 5.3.4 نموذج التنفيذ
+model ExecutionForm {
+  id           String   @id @default(cuid())
+  document     CouncilDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentId   String   @unique
+  decisionNo   String?
+  decisionDate DateTime?
+  actionRequired String?
+  targetEntity String?
+  sentAt       DateTime?
+  signedBy     String?
+  createdAt    DateTime @default(now())
+}
+
+// 5.3.5 نظام طلبات الوصول
+model AccessRequest {
+  id          String   @id @default(cuid())
+  requester   User     @relation("Requester", fields: [requesterId], references: [id])
+  requesterId String
+  judgeId     String
+  document    CouncilDocument? @relation(fields: [documentId], references: [id])
+  documentId  String?
+  reason      String
+  status      String   @default("pending") // pending / approved / rejected
+  decidedById String?
+  decidedAt   DateTime?
+  createdAt   DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Module 3 — Judicial Movement (Section 6) — الحركة القضائية
+// ---------------------------------------------------------------------------
+
+model MovementCycle {
+  id            String   @id @default(cuid())
+  judicialYear  String   @unique
+  status        String   @default("draft") // draft / needs / wishes_open / wishes_closed / allocated / approved
+  wishesOpenAt  DateTime?
+  wishesCloseAt DateTime?
+  maxWishes     Int      @default(5)
+  approvedAt    DateTime?
+  createdAt     DateTime @default(now())
+
+  needs         CourtNeed[]
+  wishes        MovementWish[]
+  allocations   MovementAllocation[]
+  rules         MovementRule[]
+}
+
+model CourtNeed {
+  id        String   @id @default(cuid())
+  cycle     MovementCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  cycleId   String
+  court     Court    @relation(fields: [courtId], references: [id])
+  courtId   String
+  grade     JudicialGrade
+  required  Int
+  approved  Boolean  @default(false)
+
+  @@unique([cycleId, courtId, grade])
+}
+
+model MovementWish {
+  id        String   @id @default(cuid())
+  cycle     MovementCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  cycleId   String
+  judge     Judge    @relation(fields: [judgeId], references: [id])
+  judgeId   String
+  courtId   String
+  rank      Int      // 1 = first choice
+  createdAt DateTime @default(now())
+
+  @@unique([cycleId, judgeId, rank])
+}
+
+// 6.3 configurable weighting rules
+model MovementRule {
+  id        String   @id @default(cuid())
+  cycle     MovementCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  cycleId   String
+  key       String   // seniority / health / wish / court_need / council_rule
+  weight    Int      @default(0)
+  isHardConstraint Boolean @default(false)
+  description String?
+}
+
+model MovementAllocation {
+  id         String   @id @default(cuid())
+  cycle      MovementCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  cycleId    String
+  judge      Judge    @relation(fields: [judgeId], references: [id])
+  judgeId    String
+  court      Court    @relation(fields: [courtId], references: [id])
+  courtId    String
+  score      Float    @default(0)
+  wishRankMet Int?    // which wish rank was satisfied (null = none)
+  isManual   Boolean  @default(false)
+  isLocked   Boolean  @default(false)
+  overrideReason String?
+  createdAt  DateTime @default(now())
+
+  @@unique([cycleId, judgeId])
+}
+
+// ---------------------------------------------------------------------------
+// Module 4 — General Assembly (Section 7) — الجمعية العامة
+// ---------------------------------------------------------------------------
+
+model AssemblyCycle {
+  id            String   @id @default(cuid())
+  judicialYear  String   @unique
+  opensAt       DateTime?
+  closesAt      DateTime?
+  createdAt     DateTime @default(now())
+
+  candidates    AssemblyCandidate[]
+}
+
+model AssemblyCandidate {
+  id            String   @id @default(cuid())
+  cycle         AssemblyCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  cycleId       String
+  judge         Judge?   @relation(fields: [judgeId], references: [id])
+  judgeId       String?
+  // For candidates not in the registry, allow manual identity fields
+  manualName    String?
+  extraInfo     String?  // assembly-only data not shown in the judge file
+  createdAt     DateTime @default(now())
+
+  @@unique([cycleId, judgeId])
+}
+
+// ---------------------------------------------------------------------------
+// Cross-cutting — Audit & Notifications
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actor      User?    @relation(fields: [actorId], references: [id])
+  actorId    String?
+  action     String   // CREATE / UPDATE / DELETE / LOGIN / GRANT / REVOKE / VOTE ...
+  entity     String   // e.g. Judge, CouncilDocument
+  entityId   String?
+  detail     String?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([actorId])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  title     String
+  body      String?
+  link      String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
